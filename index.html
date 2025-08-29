@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Commande Fruits & Légumes — UTILE ENTRAIGUES</title>
+<style>
+  :root{
+    --green:#16a34a; /* vert */
+    --green-900:#14532d;
+    --bg:#f6f7f9;
+    --card:#fff;
+    --border:#ddd;
+    --text:#111;
+  }
+  body{font-family:Arial,sans-serif;background:var(--bg);margin:0;padding:20px;color:var(--text)}
+  .container{max-width:1100px;margin:auto}
+  .nav{display:flex;gap:10px;margin-bottom:20px}
+  .tab{padding:10px 15px;border:1px solid var(--border);background:var(--card);cursor:pointer;border-radius:8px}
+  .tab.active{background:var(--green);color:#fff;border-color:var(--green)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+  .msg{padding:10px;border-radius:8px;border:1px solid #ffe08a;background:#fff8db;color:#8a5b00}
+  .footer{text-align:center;font-size:12px;color:#555;margin-top:20px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .btn{background:var(--green);color:#fff;border:none;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .pill{padding:6px 10px;border:1px solid var(--border);background:#fff;border-radius:999px}
+  input[type="number"]{width:80px;padding:6px;border:1px solid var(--border);border-radius:6px}
+  select, input[type="file"]{padding:6px;border:1px solid var(--border);border-radius:6px;background:#fff}
+  .cart-line{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px dashed #e5e7eb}
+  .grow{flex:1 1 auto}
+  .muted{color:#6b7280}
+</style>
+
+<!-- libs -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.19.3/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+<div class="container">
+  <div class="nav">
+    <button class="tab active" id="tabCatalog" onclick="go('catalog')">Catalogue</button>
+    <button class="tab" id="tabCart" onclick="go('cart')">Panier</button>
+  </div>
+
+  <section id="pageCatalog">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div class="row">
+          <input type="file" id="file" accept=".csv,.xlsx,.xls"/>
+          <button class="btn" id="btnImport" onclick="startImport()" title="Importer et publier le catalogue">Importer</button>
+          <span id="status" class="msg" style="display:none"></span>
+        </div>
+        <div class="row">
+          <label class="muted">Filtrer par groupe:</label>
+          <select id="filterGroupe" class="pill" onchange="applyFilter()">
+            <option value="">Tous</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+
+  <section id="pageCart" style="display:none">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div class="row">
+          <button class="btn" onclick="exportCSV()">Exporter CSV</button>
+          <button class="btn" onclick="exportPDF()">Exporter PDF</button>
+          <button class="btn" onclick="sendEmail()">Envoyer par email</button>
+        </div>
+        <div class="muted" id="cartInfo"></div>
+      </div>
+    </div>
+    <div class="card" id="cart"></div>
+  </section>
+
+  <div class="footer">UTILE ENTRAIGUES — Application de commande Fruits & Légumes</div>
+</div>
+
+<script>
+/** 👉👉 REMPLACE ICI par tes clés Supabase **/
+const SUPABASE_URL  = "https://wkzfqfgzjkxowieesjbk.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndremZxZmd6amt4b3dpZWVzamJrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY0NzY5ODksImV4cCI6MjA3MjA1Mjk4OX0.PX97fuvXJE4PA8_tkXLtB5ke1oCHNLTa7yV_KDlG5Ao";
+
+/** Tables attendues (créées dans Supabase) :
+ * catalogue(id uuid default gen_random_uuid() primary key, designation text, groupe text)
+ * panier(id text primary key, lignes jsonb, updated_at timestamptz default now())
+ * RLS activé, politique en lecture/écriture permissive (un seul utilisateur).
+ */
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// état local
+let catalogue = [];       // [{id, designation, groupe}]
+let filtered = [];        // catalogue filtré
+let cart = [];            // [{id, designation, groupe, quantite, unite}]
+const CART_ID = 'unique'; // un seul panier pour tous les appareils
+
+// UI helpers
+function go(page){
+  document.getElementById("pageCatalog").style.display = page==="catalog" ? "" : "none";
+  document.getElementById("pageCart").style.display    = page==="cart" ? "" : "none";
+  document.getElementById("tabCatalog").classList.toggle("active", page==="catalog");
+  document.getElementById("tabCart").classList.toggle("active", page==="cart");
+  if(page==="cart") drawCart();
+}
+function showMsg(txt){ const s = document.getElementById("status"); s.textContent = txt; s.style.display='inline-block'; }
+function hideMsg(){ const s = document.getElementById("status"); s.style.display='none'; }
+
+// ====== CATALOGUE ======
+function norm(s){ return String(s||"").trim(); }
+
+function drawCatalogue(){
+  const g = document.getElementById("grid");
+  if(!filtered.length){
+    g.innerHTML = '<div class="msg">Aucun produit. Importe un fichier ou vérifie le filtre.</div>';
+    return;
+  }
+  g.innerHTML = filtered.map(r => {
+    const qid = `q_${r.id}`;
+    const uid = `u_${r.id}`;
+    return `<div class="card">
+      <div><b>${escapeHTML(r.designation)}</b></div>
+      <div class="muted">${escapeHTML(r.groupe||"")}</div>
+      <div class="row" style="margin-top:8px">
+        <input type="number" id="${qid}" min="1" value="1" />
+        <select id="${uid}">
+          <option>colis</option>
+          <option>kilo</option>
+          <option>pièce</option>
+        </select>
+        <button class="btn" onclick='addToCart("${r.id}")'>Ajouter</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function populateFilter(){
+  const sel = document.getElementById("filterGroupe");
+  const groupes = [...new Set(catalogue.map(x => x.groupe).filter(Boolean))].sort();
+  sel.innerHTML = `<option value="">Tous</option>` + groupes.map(g => `<option>${escapeHTML(g)}</option>`).join("");
+}
+
+function applyFilter(){
+  const v = document.getElementById("filterGroupe").value;
+  filtered = v ? catalogue.filter(x => (x.groupe||"") === v) : [...catalogue];
+  drawCatalogue();
+}
+
+// ====== CART ======
+function addToCart(id){
+  const prod = catalogue.find(x => x.id === id);
+  const qEl = document.getElementById("q_"+id);
+  const uEl = document.getElementById("u_"+id);
+  const quantite = Math.max(1, Number(qEl?.value || 1));
+  const unite = uEl?.value || "colis";
+
+  const existing = cart.find(x => x.id === id && x.unite === unite);
+  if(existing){ existing.quantite += quantite; }
+  else { cart.push({ id: prod.id, designation: prod.designation, groupe: prod.groupe, quantite, unite }); }
+  drawCart();
+  persistCart();
+}
+
+function drawCart(){
+  const box = document.getElementById("cart");
+  if(!cart.length){ box.innerHTML = '<div class="msg">Panier vide</div>'; }
+  else {
+    box.innerHTML = cart.map((it, idx) => `
+      <div class="cart-line">
+        <div class="grow">
+          <div><b>${escapeHTML(it.designation)}</b></div>
+          <div class="muted">${escapeHTML(it.unite)}</div>
+        </div>
+        <input type="number" min="1" value="${it.quantite}" onchange="updateQty(${idx}, this.value)" />
+        <button class="btn" onclick="removeLine(${idx})" title="Retirer">Retirer</button>
+      </div>
+    `).join("");
+  }
+  const info = document.getElementById("cartInfo");
+  info.textContent = `${cart.length} ligne(s) — sauvegarde automatique`;
+}
+
+function updateQty(i, v){
+  cart[i].quantite = Math.max(1, Number(v||1));
+  persistCart();
+}
+function removeLine(i){
+  cart.splice(i,1);
+  drawCart();
+  persistCart();
+}
+
+// ====== EXPORTS/EMAIL ======
+function exportCSV(){
+  if(!cart.length) return;
+  const rows = [["designation","groupe","quantite","unite"]]
+    .concat(cart.map(x => [x.designation, x.groupe||"", String(x.quantite), x.unite]));
+  const csv = rows.map(r => r.map(escapeCSV).join(";")).join("\n");
+  downloadBlob(new Blob([csv], {type:"text/csv;charset=utf-8"}), "commande.csv");
+}
+
+async function exportPDF(){
+  // version simple (texte) pour rester autonome côté client
+  const lines = ["COMMANDE — UTILE ENTRAIGUES", new Date().toLocaleString(),"", "Désignation ; Groupe ; Qté ; Unité",""]
+    .concat(cart.map(x => `${x.designation} ; ${x.groupe||""} ; ${x.quantite} ; ${x.unite}`));
+  const blob = new Blob([lines.join("\n")], {type:"application/pdf"}); // pas un vrai PDF vectoriel, mais un fichier à télécharger
+  downloadBlob(blob, "commande.pdf");
+}
+
+function sendEmail(){
+  const body = cart.map(x => `- ${x.designation} (${x.groupe||"?"}) : ${x.quantite} ${x.unite}`).join("%0D%0A");
+  window.location.href = `mailto:?subject=Commande fruits et légumes&body=${body}`;
+}
+
+function downloadBlob(blob, name){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ====== SUPABASE: LOAD/SAVE ======
+async function loadCatalogue(){
+  const { data, error } = await sb.from("catalogue").select("id, designation, groupe").order("groupe", {ascending:true}).order("designation", {ascending:true});
+  if(error){ showMsg("Erreur chargement catalogue: "+error.message); return; }
+  catalogue = (data||[]).map(r => ({id:r.id, designation:r.designation||"", groupe:r.groupe||""}));
+  filtered = [...catalogue];
+  populateFilter();
+  drawCatalogue();
+}
+
+async function persistCatalogueFromMatrix(matrix){
+  // On attend colonnes: "designation" (B) et "groupe" (P). On tolère casse et espaces.
+  const headers = (matrix[0]||[]).map(h => String(h||"").trim().toLowerCase());
+  const idxDes = headers.findIndex(h => h.includes("designation"));
+  const idxGrp = headers.findIndex(h => h.includes("groupe"));
+  if(idxDes < 0 || idxGrp < 0){ showMsg("En-têtes introuvables (attendu: 'designation' et 'groupe')."); return; }
+
+  // Nettoyage puis upsert (on refait tout le catalogue)
+  showMsg("Publication du catalogue…");
+  await sb.from("catalogue").delete().neq("id","00000000-0000-0000-0000-000000000000");
+  const batch = [];
+  for(let i=1;i<matrix.length;i++){
+    const row = matrix[i]||[];
+    const des = norm(row[idxDes]);
+    const grp = norm(row[idxGrp]);
+    if(!des) continue;
+    batch.push({ designation: des, groupe: grp || null });
+  }
+  if(!batch.length){ showMsg("Aucun produit détecté après nettoyage."); return; }
+  // Insert par paquets de 500
+  for(let i=0;i<batch.length;i+=500){
+    const slice = batch.slice(i,i+500);
+    const {error} = await sb.from("catalogue").insert(slice);
+    if(error){ showMsg("Erreur import: "+error.message); return; }
+  }
+  hideMsg();
+  await loadCatalogue();
+}
+
+async function loadCart(){
+  const { data, error } = await sb.from("panier").select("lignes").eq("id", CART_ID).maybeSingle();
+  if(error){ showMsg("Erreur chargement panier: "+error.message); return; }
+  cart = Array.isArray(data?.lignes) ? data.lignes : [];
+  drawCart();
+}
+
+async function persistCart(){
+  const payload = { id: CART_ID, lignes: cart, updated_at: new Date().toISOString() };
+  const { error } = await sb.from("panier").upsert(payload, { onConflict:"id" });
+  if(error){ showMsg("Erreur sauvegarde panier: "+error.message); return; }
+}
+
+// ====== FILE IMPORT ======
+let fileToImport = null;
+document.getElementById("file").addEventListener("change", e => { fileToImport = e.target.files?.[0] || null; });
+
+function startImport(){
+  if(!fileToImport){ showMsg("Sélectionne un fichier CSV/XLSX"); return; }
+  const name = (fileToImport.name||"").toLowerCase();
+  if(name.endsWith(".csv")){
+    const r = new FileReader();
+    r.onload = ev => {
+      const text = ev.target.result;
+      const lines = text.split(/\r?\n/).filter(l=>l.length);
+      const sep = lines[0].split(";").length>1 ? ";" : ",";
+      const matrix = lines.map(l => l.split(sep));
+      persistCatalogueFromMatrix(matrix);
+    };
+    r.readAsText(fileToImport, "utf-8");
+  } else {
+    const r = new FileReader();
+    r.onload = ev => {
+      const wb = XLSX.read(new Uint8Array(ev.target.result), {type:"array"});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const matrix = XLSX.utils.sheet_to_json(ws, {header:1, raw:true});
+      persistCatalogueFromMatrix(matrix);
+    };
+    r.readAsArrayBuffer(fileToImport);
+  }
+}
+
+// ====== UTIL ======
+function escapeHTML(s){ return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
+function escapeCSV(s){ s=String(s??""); return /[;"\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
+
+// ====== BOOT ======
+(async function boot(){
+  // test connexion
+  try{
+    const { data, error } = await sb.from("catalogue").select("id").limit(1);
+    if(error) throw error;
+  }catch(e){
+    showMsg("Supabase indisponible : vérifie l’URL/clé dans le fichier.");
+    return;
+  }
+  await loadCatalogue();
+  await loadCart();
+})();
+</script>
+</body>
+</html>
